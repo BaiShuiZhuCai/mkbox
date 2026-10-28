@@ -273,20 +273,55 @@ func TestEditConfigEnablesCRIAndUsesContainerd2Tables(t *testing.T) {
 	}
 }
 
-func TestHasCRIPlugin(t *testing.T) {
+func TestCRIStatus(t *testing.T) {
+	// ctr plugins ls prints the plugin URI split over the TYPE and ID
+	// columns, so the uri never appears on a single line.
+	const header = "TYPE                                  ID                        PLATFORMS      STATUS\n"
 	cases := []struct {
-		name string
-		out  string
-		want bool
+		name   string
+		out    string
+		found  bool
+		status string
 	}{
-		{"containerd 1.x", "io.containerd.grpc.v1.cri          linux/amd64    ok\n", true},
-		{"containerd 2.x", "io.containerd.cri.v1.runtime       linux/amd64    ok\n", true},
-		{"cri disabled", "io.containerd.grpc.v1.healthcheck   linux/amd64    ok\n", false},
-		{"empty", "", false},
+		{
+			name:   "containerd 1.x",
+			out:    header + "io.containerd.grpc.v1                 healthcheck               -              ok\nio.containerd.grpc.v1                 cri                       linux/amd64    ok\n",
+			found:  true,
+			status: "ok",
+		},
+		{
+			name:   "containerd 2.x",
+			out:    header + "io.containerd.cri.v1                  images                    linux/amd64    ok\nio.containerd.cri.v1                  runtime                   linux/amd64    ok\n",
+			found:  true,
+			status: "ok",
+		},
+		{
+			name:   "cri plugin failed",
+			out:    header + "io.containerd.cri.v1                  runtime                   linux/amd64    error\n",
+			found:  true,
+			status: "error",
+		},
+		{
+			name:  "cri disabled",
+			out:   header + "io.containerd.grpc.v1                 healthcheck               -              ok\n",
+			found: false,
+		},
+		{
+			name:   "quiet output",
+			out:    "io.containerd.grpc.v1.cri\n",
+			found:  true,
+			status: "",
+		},
+		{
+			name:  "empty",
+			out:   "",
+			found: false,
+		},
 	}
 	for _, tc := range cases {
-		if got := HasCRIPlugin(tc.out); got != tc.want {
-			t.Errorf("%s: HasCRIPlugin = %v; want %v", tc.name, got, tc.want)
+		found, status := CRIStatus(tc.out)
+		if found != tc.found || status != tc.status {
+			t.Errorf("%s: CRIStatus = (%v, %q); want (%v, %q)", tc.name, found, status, tc.found, tc.status)
 		}
 	}
 }

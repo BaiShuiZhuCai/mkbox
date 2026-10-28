@@ -235,7 +235,9 @@ sudo ctr plugins ls | grep -E 'cri|healthcheck'
 ```
 
 - `/etc/containerd/config.toml` 中出现 `disabled_plugins = ["cri"]`，或 `ctr plugins ls` 里没有 `io.containerd.grpc.v1.cri`（1.x）/ `io.containerd.cri.v1.runtime`（2.x）。
+- `ctr plugins ls` 的插件 URI 被拆成 `TYPE` 和 `ID` 两列，CRI 显示为 `io.containerd.grpc.v1   cri`（1.x）或 `io.containerd.cri.v1   runtime`（2.x），整串 URI 不会出现在同一行。
 - 处理方式：`sudo mkbox k8s install` 会自动从 `disabled_plugins` 中移除 `cri` 并重启 containerd；手动处理则删除该条目后执行 `sudo systemctl restart containerd`。
+- mkbox 在重启 containerd 后会执行同一条校验：缺插件或插件状态为 `error` 时直接报错，而不是等到拉取镜像才失败。
 - 如果 `ctr plugins ls` 里 CRI 插件状态不是 `ok`，执行 `journalctl -u containerd -n 200 --no-pager` 查看插件加载失败的具体字段。
 
 ### CNI 安装失败

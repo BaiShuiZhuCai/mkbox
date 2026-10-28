@@ -455,19 +455,41 @@ func HostsTOML(server string, mirrors []string) string {
 	return b.String()
 }
 
-// HasCRIPlugin reports whether `ctr plugins ls` output lists a CRI plugin.
-// containerd 1.x registers io.containerd.grpc.v1.cri, 2.x splits the CRI
-// plugin into io.containerd.cri.v1.runtime and io.containerd.cri.v1.images.
-func HasCRIPlugin(pluginsOutput string) bool {
-	return strings.Contains(pluginsOutput, "io.containerd.cri.v1.runtime") ||
-		strings.Contains(pluginsOutput, "io.containerd.grpc.v1.cri")
+// CRIStatus scans `ctr plugins ls` output and reports whether the CRI plugin
+// is registered together with its STATUS column. The plugin URI is split over
+// the TYPE and ID columns, for example:
+//
+//	io.containerd.grpc.v1  cri      linux/amd64  ok    (containerd 1.x)
+//	io.containerd.cri.v1   runtime  linux/amd64  ok    (containerd 2.x)
+//
+// A single column holding the full URI (quiet output) is accepted as well.
+func CRIStatus(pluginsOutput string) (found bool, status string) {
+	for _, line := range strings.Split(pluginsOutput, "\n") {
+		fields := strings.Fields(line)
+		switch {
+		case len(fields) == 0:
+			continue
+		case len(fields) == 1:
+			if isCRIPluginURI(fields[0]) {
+				return true, ""
+			}
+		case isCRIPluginURI(fields[0] + "." + fields[1]):
+			return true, fields[len(fields)-1]
+		}
+	}
+	return false, ""
+}
+
+// isCRIPluginURI reports whether uri addresses the CRI runtime plugin.
+func isCRIPluginURI(uri string) bool {
+	return uri == "io.containerd.grpc.v1.cri" || uri == "io.containerd.cri.v1.runtime"
 }
 
 // VerifyCRI checks that the running containerd actually serves the CRI API.
 // kubeadm fails with "unknown service runtime.v1.RuntimeService" when the
 // plugin is disabled, so the check turns a late, cryptic failure into an
-// actionable error. It is best-effort: without ctr or a reachable socket the
-// check is skipped.
+// actionable error. It is best-effort: without ctr, a reachable socket or
+// readable output the check is skipped.
 func (m *Manager) VerifyCRI() error {
 	if m.R == nil || m.R.DryRun || !execx.Has("ctr") {
 		return nil
@@ -477,10 +499,18 @@ func (m *Manager) VerifyCRI() error {
 		logx.Warnf("无法读取 containerd 插件列表，跳过 CRI 校验: %v", err)
 		return nil
 	}
-	if HasCRIPlugin(out) {
+	if strings.TrimSpace(out) == "" {
+		logx.Warnf("containerd 插件列表为空，跳过 CRI 校验")
 		return nil
 	}
-	return fmt.Errorf("containerd 已启动但未启用 CRI 插件，kubeadm 会报 unknown service runtime.v1.RuntimeService；请从 %s 的 disabled_plugins 中移除 cri 后重启 containerd", m.Path)
+	found, status := CRIStatus(out)
+	switch {
+	case !found:
+		return fmt.Errorf("containerd 已启动但未提供 CRI 服务（ctr plugins ls 中缺少 cri 插件）；请检查 %s 的 disabled_plugins 并查看 journalctl -u containerd", m.Path)
+	case status == "error":
+		return fmt.Errorf("containerd 的 CRI 插件加载失败（status=error）；请执行 journalctl -u containerd 查看具体原因")
+	}
+	return nil
 }
 
 // Restart restarts containerd and verifies that the CRI plugin is served.

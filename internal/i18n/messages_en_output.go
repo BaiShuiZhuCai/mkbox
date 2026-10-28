@@ -278,7 +278,11 @@ var englishOutput = map[string]string{
 	"普通用户（修改系统需 sudo）": "Regular user (sudo required for changes)",
 
 	// containerd CRI plugin messages.
-	"containerd 已启动但未启用 CRI 插件，kubeadm 会报 unknown service runtime.v1.RuntimeService；请从 %s 的 disabled_plugins 中移除 cri 后重启 containerd": "containerd is running without the CRI plugin and kubeadm fails with unknown service runtime.v1.RuntimeService; remove cri from disabled_plugins in %s and restart containerd",
+	"containerd 已启动但未提供 CRI 服务（ctr plugins ls 中缺少 cri 插件）；请检查 %s 的 disabled_plugins 并查看 journalctl -u containerd": "containerd is running without the CRI service (ctr plugins ls has no cri plugin); check disabled_plugins in %s and run journalctl -u containerd",
+
+	"containerd 的 CRI 插件加载失败（status=error）；请执行 journalctl -u containerd 查看具体原因": "Failed to load the containerd CRI plugin (status=error); run journalctl -u containerd for details",
 
 	"无法读取 containerd 插件列表，跳过 CRI 校验: %v": "Cannot read the containerd plugin list; skipping the CRI check: %v",
+
+	"containerd 插件列表为空，跳过 CRI 校验": "The containerd plugin list is empty; skipping the CRI check",
 }
