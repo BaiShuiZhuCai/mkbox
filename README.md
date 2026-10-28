@@ -45,8 +45,14 @@ Release artifacts:
 | `mkbox-linux-amd64.tar.gz` | Linux x86_64 |
 | `mkbox-linux-arm64.tar.gz` | Linux ARM64 |
 | `mkbox-linux-arm.tar.gz` | Linux ARMv7 |
+| `mkbox_<version>_<arch>.deb` | Debian / Ubuntu (amd64, arm64, armhf) |
+| `mkbox-<version>-1.<arch>.rpm` | RHEL / Fedora / SUSE (x86_64, aarch64, armv7hl) |
+| `mkbox_<version>-r1_<arch>.apk` | Alpine Linux (x86_64, aarch64, armv7) |
+| `mkbox-<version>-1-<arch>.pkg.tar.zst` | Arch Linux (x86_64, aarch64, armv7h) |
 | `makebox-<version>-source.tar.gz` | Complete source archive |
 | `checksums.txt` | SHA-256 checksums for all artifacts |
+
+Distribution packages install `mkbox` to `/usr/bin/mkbox` plus documentation under `/usr/share/doc/mkbox/`. They are unsigned, so verify `checksums.txt` before installing; Alpine requires `apk add --allow-untrusted` for an unsigned local package.
 
 ### Install script
 
@@ -69,7 +75,10 @@ git clone https://github.com/makebox/makebox.git
 cd makebox
 make build          # writes bin/mkbox
 sudo make install   # installs to /usr/local/bin
+make packages       # dist/ deb, rpm, apk and Arch packages (requires nfpm)
 ```
+
+`make packages` expects [nfpm](https://nfpm.goreleaser.com) on `PATH` (`go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest`); set `NFPM=/path/to/nfpm` to override.
 
 The result is a single static binary. Target machines do not need Go, Python, or any other runtime.
 
