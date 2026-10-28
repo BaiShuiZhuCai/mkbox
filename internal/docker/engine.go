@@ -3,6 +3,8 @@ package docker
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/makebox/makebox/internal/execx"
@@ -97,6 +99,53 @@ func debArch(arch string) string {
 		return "armhf"
 	}
 	return arch
+}
+
+func rpmArch(arch string) string {
+	switch arch {
+	case "amd64":
+		return "x86_64"
+	case "arm64":
+		return "aarch64"
+	case "386":
+		return "i686"
+	case "arm":
+		return "armhfp"
+	}
+	return arch
+}
+
+// rpmDistro returns the Docker repository distro path for an RPM host.
+// Docker publishes Fedora builds below linux/fedora and RHEL/CentOS ones below
+// linux/centos; dnf expands $releasever to the host release (for example 43 on
+// Fedora), so the two paths cannot be shared.
+func rpmDistro(o *system.OS) string {
+	if strings.EqualFold(o.ID, "fedora") {
+		return "fedora"
+	}
+	for _, like := range o.IDLike {
+		if strings.Contains(strings.ToLower(like), "fedora") {
+			return "fedora"
+		}
+	}
+	return "centos"
+}
+
+// releaseVersions lists candidate $releasever values, newest first. Building
+// blocklists lag behind new distribution releases, so older values are tried
+// before giving up.
+func releaseVersions(versionID string) []string {
+	fields := strings.SplitN(strings.TrimSpace(versionID), ".", 2)
+	major, err := strconv.Atoi(fields[0])
+	if err != nil || major <= 0 {
+		return nil
+	}
+	const fallbacks = 3
+	out := make([]string, 0, fallbacks)
+	for i := 0; i < fallbacks && major-i > 0; i++ {
+		out = append(out, strconv.Itoa(major-i))
+	}
+	return out
 }
 
 // Install installs Docker Engine and its CLI plugins.
@@ -233,8 +282,9 @@ func (e *Engine) setupAptRepo() error {
 }
 
 func (e *Engine) setupRPMRepo() error {
+	distro := rpmDistro(e.OS)
 	base := mirrorHost(e.Mirror)
-	repoURL := base + "/linux/centos/docker-ce.repo"
+	repoURL := base + "/linux/" + distro + "/docker-ce.repo"
 	logx.Infof("配置 Docker yum 源: %s", repoURL)
 
 	if execx.Has("dnf") {
@@ -247,13 +297,53 @@ func (e *Engine) setupRPMRepo() error {
 		return nil
 	}
 	content, err := e.R.Output("curl", "-fsSL", repoURL)
+	if err != nil && e.Mirror != "official" {
+		fallbackURL := mirrorHost("official") + "/linux/" + distro + "/docker-ce.repo"
+		logx.Warnf("软件源 %s 不可用，回退到官方源 %s", repoURL, fallbackURL)
+		base, repoURL = mirrorHost("official"), fallbackURL
+		content, err = e.R.Output("curl", "-fsSL", repoURL)
+	}
 	if err != nil {
 		return fmt.Errorf("下载 Docker yum 源失败（%s）: %w", repoURL, err)
 	}
 	if e.Mirror != "official" && strings.Contains(content, "download.docker.com") {
 		content = strings.ReplaceAll(content, "https://download.docker.com", base)
 	}
-	return e.FS.Write(YUMRepo, []byte(content), 0o644)
+	if strings.Contains(content, "$releasever") {
+		ver, err := e.repoReleaseVersion(base, distro)
+		if err != nil {
+			return err
+		}
+		if ver != e.OS.VersionID && ver != "" {
+			logx.Warnf("软件源尚未提供 %s 的构建，改用 %s（已固定 $releasever=%s）", e.OS.DisplayName(), ver, ver)
+			content = strings.ReplaceAll(content, "$releasever", ver)
+		}
+	}
+	if err := e.FS.Write(YUMRepo, []byte(content), 0o644); err != nil {
+		return err
+	}
+	logx.Successf("已写入 %s", YUMRepo)
+	return nil
+}
+
+// repoReleaseVersion returns a $releasever value that the repository really
+// publishes for this host, preferring the running release. Docker does not
+// build RPMs for every distribution release, so a fresh Fedora/CentOS release
+// would otherwise make dnf fail with HTTP 404.
+func (e *Engine) repoReleaseVersion(base, distro string) (string, error) {
+	candidates := releaseVersions(e.OS.VersionID)
+	if len(candidates) == 0 {
+		return "", nil
+	}
+	arch := rpmArch(e.OS.Arch)
+	for _, ver := range candidates {
+		url := fmt.Sprintf("%s/linux/%s/%s/%s/stable/repodata/repomd.xml", base, distro, ver, arch)
+		if err := e.R.Run("curl", "-fsSIL", "-o", os.DevNull, url); err == nil {
+			return ver, nil
+		}
+	}
+	return "", fmt.Errorf("Docker 软件源 %s 中没有可用的 %s 构建（已尝试版本 %s），请换用 --mirror official 或安装发行版自带的 docker 包",
+		base, distro, strings.Join(candidates, "/"))
 }
 
 func (e *Engine) setupZypperRepo() error {
