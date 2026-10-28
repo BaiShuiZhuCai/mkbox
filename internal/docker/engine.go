@@ -115,16 +115,16 @@ func rpmArch(arch string) string {
 	return arch
 }
 
-// rpmDistro returns the Docker repository distro path for an RPM host.
-// Docker publishes Fedora builds below linux/fedora and RHEL/CentOS ones below
-// linux/centos; dnf expands $releasever to the host release (for example 43 on
-// Fedora), so the two paths cannot be shared.
 func rpmDistro(o *system.OS) string {
-	if strings.EqualFold(o.ID, "fedora") {
-		return "fedora"
+	id := strings.ToLower(strings.TrimSpace(o.ID))
+	if id != "" {
+		if id == "fedora" {
+			return "fedora"
+		}
+		return "centos"
 	}
 	for _, like := range o.IDLike {
-		if strings.Contains(strings.ToLower(like), "fedora") {
+		if strings.EqualFold(strings.TrimSpace(like), "fedora") {
 			return "fedora"
 		}
 	}
@@ -393,7 +393,12 @@ func (e *Engine) rpmInstall(pkgs ...string) error {
 // Enable enables and starts the Docker service.
 func (e *Engine) Enable() error {
 	if e.OS.HasSystemd() {
-		if err := e.R.Run("systemctl", "enable", "--now", "docker"); err != nil {
+		// `systemctl enable --now` needs systemd >= 220 while CentOS/RHEL 7
+		// ships 219, so enable and start are kept as separate steps.
+		if err := e.R.Run("systemctl", "enable", "docker"); err != nil {
+			return fmt.Errorf("设置 Docker 开机启动失败: %v", err)
+		}
+		if err := e.R.Run("systemctl", "start", "docker"); err != nil {
 			return fmt.Errorf("启动 Docker 服务失败: %w", err)
 		}
 		return nil

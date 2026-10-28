@@ -16,12 +16,16 @@ func TestRPMDistro(t *testing.T) {
 	}{
 		{"fedora", nil, "fedora"},
 		{"fedora", []string{"rhel", "centos"}, "fedora"},
-		{"rhel", []string{"fedora"}, "fedora"},
+		{"centos", []string{"rhel", "centos", "fedora"}, "centos"},
+		{"rhel", []string{"fedora"}, "centos"},
 		{"rhel", nil, "centos"},
 		{"centos", []string{"rhel", "centos"}, "centos"},
-		{"rocky", []string{"rhel", "centos"}, "centos"},
-		{"almalinux", []string{"rhel", "centos"}, "centos"},
-		{"ol", []string{"fedora"}, "fedora"},
+		{"rocky", []string{"rhel", "centos", "fedora"}, "centos"},
+		{"almalinux", []string{"rhel", "centos", "fedora"}, "centos"},
+		{"ol", []string{"fedora"}, "centos"},
+		{"", []string{"fedora"}, "fedora"},
+		{"", []string{"rhel", "fedora"}, "fedora"},
+		{"", []string{"rhel"}, "centos"},
 	}
 	for _, c := range cases {
 		got := rpmDistro(&system.OS{ID: c.id, IDLike: c.like})
@@ -61,8 +65,6 @@ func TestReleaseVersions(t *testing.T) {
 	}
 }
 
-// Fedora must not reuse the CentOS repository path: dnf expands $releasever
-// to the Fedora release, which only exists below linux/fedora.
 func TestFedoraRepoPath(t *testing.T) {
 	osInfo := &system.OS{ID: "fedora", VersionID: "43", Family: "rhel"}
 	distro := rpmDistro(osInfo)
@@ -70,5 +72,17 @@ func TestFedoraRepoPath(t *testing.T) {
 	want := "https://mirrors.aliyun.com/docker-ce/linux/fedora/docker-ce.repo"
 	if got != want {
 		t.Errorf("fedora repo url = %q; want %q", got, want)
+	}
+}
+
+func TestCentOS7RepoPath(t *testing.T) {
+	osInfo := &system.OS{ID: "centos", IDLike: []string{"rhel", "fedora"}, VersionID: "7", Family: "rhel"}
+	got := fmt.Sprintf("%s/linux/%s/docker-ce.repo", mirrorHost("aliyun"), rpmDistro(osInfo))
+	want := "https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo"
+	if got != want {
+		t.Errorf("centos 7 repo url = %q; want %q", got, want)
+	}
+	if vers := releaseVersions(osInfo.VersionID); strings.Join(vers, "/") != "7/6/5" {
+		t.Errorf("releaseVersions(7) = %v; want 7/6/5", vers)
 	}
 }
