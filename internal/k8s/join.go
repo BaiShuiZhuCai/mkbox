@@ -128,12 +128,28 @@ func joinKubeadm(osInfo *system.OS, r *execx.Runner, fs *system.FS, opts JoinOpt
 			args = append(args, "--certificate-key", opts.CertificateKey)
 		}
 	}
+	if cgroupV1JoinFallback(r) {
+		args = append(args, CgroupV1PreflightArg)
+		logx.Warnf("当前节点仅支持 cgroups v1，已为 kubeadm join 跳过 SystemVerification 预检")
+	}
 	logx.Header("加入 Kubernetes 集群")
 	if err := r.Run("kubeadm", args...); err != nil {
 		return fmt.Errorf("kubeadm join 失败: %w", err)
 	}
 	logx.Successf("节点已加入集群，请在控制面执行: kubectl get nodes -o wide")
 	return nil
+}
+
+// cgroupV1JoinFallback reports whether this node needs the cgroup v1 override.
+func cgroupV1JoinFallback(r *execx.Runner) bool {
+	if system.HasCgroupV2() {
+		return false
+	}
+	out, err := r.Output("kubeadm", "version", "-o", "short")
+	if err != nil {
+		return false
+	}
+	return NeedsCgroupV1Fallback(out, true)
 }
 
 func firstCommandLine(content string) string {

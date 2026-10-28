@@ -140,6 +140,9 @@ func JoinCommand(osInfo *system.OS, r *execx.Runner, distro string) (string, err
 	if !strings.Contains(join, "--cri-socket") {
 		join += " --cri-socket " + DetectCRISocket()
 	}
+	if cgroupV1JoinFallback(r) {
+		join += " " + CgroupV1PreflightArg
+	}
 	return join, nil
 }
 

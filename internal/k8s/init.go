@@ -118,7 +118,12 @@ func (in *Initializer) initKubeadm() (*InitResult, error) {
 		criSocket = DetectCRISocket()
 	}
 
-	apiVersion := KubeadmAPIVersion(in.detectedKubeadmVersion())
+	kubeadmVersion := in.detectedKubeadmVersion()
+	apiVersion := KubeadmAPIVersion(kubeadmVersion)
+	cgroupV1 := NeedsCgroupV1Fallback(kubeadmVersion, !system.HasCgroupV2())
+	if cgroupV1 {
+		logx.Warnf("系统仅支持 cgroups v1，Kubernetes 1.35 起默认拒绝启动 kubelet；已写入 failCgroupV1: false 并跳过 SystemVerification 预检")
+	}
 	kubeadmCfg, err := KubeadmConfig(KubeadmOptions{
 		APIAddress:           nodeIP,
 		ControlPlaneEndpoint: in.Opts.ControlPlaneEndpoint,
@@ -127,6 +132,7 @@ func (in *Initializer) initKubeadm() (*InitResult, error) {
 		ServiceCIDR:          in.Opts.ServiceCIDR,
 		CRISocket:            criSocket,
 		APIVersion:           apiVersion,
+		CgroupV1:             cgroupV1,
 	})
 	if err != nil {
 		return nil, err
@@ -136,9 +142,13 @@ func (in *Initializer) initKubeadm() (*InitResult, error) {
 	}
 	logx.Successf("已生成 kubeadm 配置: %s", KubeadmConfigPath)
 
+	initArgs := []string{"init", "--config", KubeadmConfigPath}
+	if cgroupV1 {
+		initArgs = append(initArgs, CgroupV1PreflightArg)
+	}
 	if in.R.DryRun {
 		logx.Infof("[dry-run] 将执行: kubeadm config images pull --config %s", KubeadmConfigPath)
-		logx.Infof("[dry-run] 将执行: kubeadm init --config %s", KubeadmConfigPath)
+		logx.Infof("[dry-run] 将执行: kubeadm %s", strings.Join(initArgs, " "))
 		return &InitResult{NodeIP: nodeIP, Kubeconfig: AdminKubeconfig}, nil
 	}
 
@@ -148,7 +158,7 @@ func (in *Initializer) initKubeadm() (*InitResult, error) {
 	}
 
 	logx.Header("初始化控制平面")
-	if err := in.R.Run("kubeadm", "init", "--config", KubeadmConfigPath); err != nil {
+	if err := in.R.Run("kubeadm", initArgs...); err != nil {
 		return nil, fmt.Errorf("kubeadm init 失败，可运行 sudo mkbox k8s reset 后重试: %w", err)
 	}
 
@@ -180,7 +190,8 @@ func (in *Initializer) initKubeadm() (*InitResult, error) {
 		logx.Successf("节点已就绪")
 	}
 
-	join, err := SaveJoinCommand(in.R, in.FS, JoinScriptPath, criSocket)
+	joinExtra := JoinArgsForCgroupV1(cgroupV1)
+	join, err := SaveJoinCommand(in.R, in.FS, JoinScriptPath, criSocket, joinExtra...)
 	if err != nil {
 		result.Warnings = append(result.Warnings, "生成 join 命令失败: "+err.Error())
 	} else {
@@ -210,6 +221,37 @@ func KubeadmAPIVersion(version string) string {
 	return "v1beta4"
 }
 
+var kubeadmMinorRe = regexp.MustCompile(`(?:^|[^0-9])1\.(\d+)`)
+
+// KubeadmMinor returns the 1.x minor parsed from a kubeadm version such as
+// "v1.35.9" or "stable-1.35". Unknown versions yield 0.
+func KubeadmMinor(version string) int {
+	m := kubeadmMinorRe.FindStringSubmatch(strings.TrimSpace(version))
+	if m == nil {
+		return 0
+	}
+	minor, _ := strconv.Atoi(m[1])
+	return minor
+}
+
+// CgroupV1PreflightArg makes kubeadm tolerate a cgroup v1 host.
+const CgroupV1PreflightArg = "--ignore-preflight-errors=SystemVerification"
+
+// NeedsCgroupV1Fallback reports whether kubeadm must be told to accept a
+// cgroup v1 host. Kubernetes 1.35 turned failCgroupV1 into a fatal kubelet
+// default and made the SystemVerification check fail on cgroup v1 nodes.
+func NeedsCgroupV1Fallback(kubeadmVersion string, cgroupV1 bool) bool {
+	return cgroupV1 && KubeadmMinor(kubeadmVersion) >= 35
+}
+
+// JoinArgsForCgroupV1 returns the flags a joining node needs on cgroup v1.
+func JoinArgsForCgroupV1(enabled bool) []string {
+	if !enabled {
+		return nil
+	}
+	return []string{CgroupV1PreflightArg}
+}
+
 // DetectCRISocket returns the CRI socket used by kubeadm.
 func DetectCRISocket() string {
 	candidates := []string{
@@ -235,6 +277,9 @@ type KubeadmOptions struct {
 	ServiceCIDR          string
 	CRISocket            string
 	APIVersion           string
+	// CgroupV1 emits the kubelet override that keeps Kubernetes 1.35+
+	// starting on cgroup v1 nodes.
+	CgroupV1 bool
 }
 
 func certSANs(opts KubeadmOptions) []string {
@@ -355,6 +400,15 @@ func KubeadmConfig(opts KubeadmOptions) (string, error) {
 			fmt.Fprintf(&b, "    - %q\n", san)
 		}
 	}
+	if opts.CgroupV1 {
+		// kubelet refuses to start on cgroup v1 since Kubernetes 1.35, so the
+		// override has to travel with the kubelet configuration kubeadm
+		// stores in the kubelet-config ConfigMap.
+		b.WriteString("---\n")
+		b.WriteString("apiVersion: kubelet.config.k8s.io/v1beta1\n")
+		b.WriteString("kind: KubeletConfiguration\n")
+		b.WriteString("failCgroupV1: false\n")
+	}
 	return b.String(), nil
 }
 
@@ -397,8 +451,9 @@ func SetupKubeconfig(r *execx.Runner, fs *system.FS, osInfo *system.OS, source s
 	return primary, nil
 }
 
-// SaveJoinCommand generates and persists a kubeadm join script.
-func SaveJoinCommand(r *execx.Runner, fs *system.FS, path, criSocket string) (string, error) {
+// SaveJoinCommand generates and persists a kubeadm join script. Extra flags
+// are appended to the saved command line when not already present.
+func SaveJoinCommand(r *execx.Runner, fs *system.FS, path, criSocket string, extra ...string) (string, error) {
 	out, err := r.Output("kubeadm", "token", "create", "--print-join-command")
 	if err != nil {
 		return "", err
@@ -409,6 +464,11 @@ func SaveJoinCommand(r *execx.Runner, fs *system.FS, path, criSocket string) (st
 	}
 	if !strings.Contains(join, "--cri-socket") {
 		join += " --cri-socket " + criSocket
+	}
+	for _, flag := range extra {
+		if flag != "" && !strings.Contains(join, flag) {
+			join += " " + flag
+		}
 	}
 	script := "#!/usr/bin/env bash\nset -euo pipefail\n" + join + "\n"
 	if err := fs.Write(path, []byte(script), 0o700); err != nil {

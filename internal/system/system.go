@@ -213,6 +213,18 @@ func (o *OS) PackageManager() string { return o.PkgMgr }
 // HasSystemd reports whether systemd is the service manager.
 func (o *OS) HasSystemd() bool { return o.ServiceMgr == "systemd" }
 
+// CgroupVersion reports the cgroup hierarchy in use: "v2" when the unified
+// hierarchy is mounted at /sys/fs/cgroup, "v1" otherwise.
+func CgroupVersion() string {
+	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err == nil {
+		return "v2"
+	}
+	return "v1"
+}
+
+// HasCgroupV2 reports whether the host runs a unified cgroup v2 hierarchy.
+func HasCgroupV2() bool { return CgroupVersion() == "v2" }
+
 // PrimaryIP returns the IPv4 address used for outbound traffic.
 func PrimaryIP() (string, error) {
 	if conn, err := net.Dial("udp", "1.1.1.1:53"); err == nil {

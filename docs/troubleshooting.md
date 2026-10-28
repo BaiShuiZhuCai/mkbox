@@ -240,6 +240,37 @@ sudo ctr plugins ls | grep -E 'cri|healthcheck'
 - mkbox 在重启 containerd 后会执行同一条校验：缺插件或插件状态为 `error` 时直接报错，而不是等到拉取镜像才失败。
 - 如果 `ctr plugins ls` 里 CRI 插件状态不是 `ok`，执行 `journalctl -u containerd -n 200 --no-pager` 查看插件加载失败的具体字段。
 
+### kubeadm 报 cgroups v1 support is deprecated
+
+CentOS 7、Ubuntu 20.04 等老系统只有 cgroups v1，kubeadm 1.35 起在预检阶段直接失败：
+
+```text
+[ERROR SystemVerification]: cgroups v1 support is deprecated and will be removed in a future release.
+To explicitly enable cgroups v1 support for kubelet v1.35 or newer, you must set the kubelet
+configuration option 'FailCgroupV1' to 'false'. You must also explicitly skip this validation.
+```
+
+确认环境：
+
+```bash
+stat -fc %T /sys/fs/cgroup   # cgroup2 为 v2，tmpfs 等其他值说明是 v1
+kubeadm version -o short
+```
+
+检测到「cgroups v1 + kubeadm 1.35 及以上」时 mkbox 会自动处理：
+
+- 在 `/etc/makebox/kubeadm-init.yaml` 末尾追加 `KubeletConfiguration` 段并写入 `failCgroupV1: false`，该配置会通过 kubelet-config ConfigMap 传播到之后加入的节点；
+- 执行 `kubeadm init --ignore-preflight-errors=SystemVerification`，同一参数也会写入 `join.sh` 和 `mkbox k8s join-command` 的输出。
+
+重新生成配置后重试：
+
+```bash
+sudo mkbox k8s reset
+sudo mkbox k8s up
+```
+
+长期方案是迁移到 cgroups v2（升级内核或发行版）。cgroups v1 将在后续 Kubernetes 版本中被彻底移除，内核 3.10 的 CentOS 7 也不在官方支持范围内，生产环境建议改用 `--version 1.34` 或更换系统。
+
 ### CNI 安装失败
 
 CNI 清单默认从 GitHub 下载。网络受限时：

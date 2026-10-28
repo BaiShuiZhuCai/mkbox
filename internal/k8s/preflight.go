@@ -46,6 +46,7 @@ func (p *Preflight) Run() error {
 	if err := p.checkKernelAndHostname(); err != nil {
 		return err
 	}
+	p.checkCgroup()
 	if err := p.disableSwap(); err != nil {
 		return err
 	}
@@ -108,6 +109,25 @@ func CommentSwap(content string) (string, int) {
 		}
 	}
 	return strings.Join(lines, "\n"), count
+}
+
+// checkCgroup warns when the host only ships cgroup v1, which Kubernetes 1.35
+// refuses to use unless failCgroupV1 is overridden.
+func (p *Preflight) checkCgroup() {
+	if system.HasCgroupV2() {
+		return
+	}
+	version := ""
+	if p.R != nil {
+		if out, err := p.R.Output("kubeadm", "version", "-o", "short"); err == nil {
+			version = out
+		}
+	}
+	if NeedsCgroupV1Fallback(version, true) {
+		logx.Warnf("系统仅支持 cgroups v1，Kubernetes 1.35 起默认拒绝启动 kubelet；mkbox 会自动写入 failCgroupV1: false 并跳过 SystemVerification 预检，长期请迁移到 cgroups v2")
+		return
+	}
+	logx.Warnf("系统仅支持 cgroups v1，升级到 Kubernetes 1.35 前需迁移到 cgroups v2，否则 kubelet 将无法启动")
 }
 
 func (p *Preflight) disableSwap() error {

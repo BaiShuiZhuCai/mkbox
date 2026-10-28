@@ -106,6 +106,79 @@ func TestKubeadmConfig(t *testing.T) {
 	}
 }
 
+func TestKubeadmMinor(t *testing.T) {
+	tests := map[string]int{
+		"v1.35.9":     35,
+		"1.35":        35,
+		"stable-1.35": 35,
+		"v1.34.1":     34,
+		"10.4":        0,
+		"garbage":     0,
+		"":            0,
+	}
+	for in, want := range tests {
+		if got := KubeadmMinor(in); got != want {
+			t.Errorf("KubeadmMinor(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+func TestNeedsCgroupV1Fallback(t *testing.T) {
+	tests := []struct {
+		version  string
+		cgroupV1 bool
+		want     bool
+	}{
+		{"v1.35.9", true, true},
+		{"stable-1.35", true, true},
+		{"v1.34.1", true, false},
+		{"v1.35.9", false, false},
+		{"", true, false},
+	}
+	for _, tc := range tests {
+		if got := NeedsCgroupV1Fallback(tc.version, tc.cgroupV1); got != tc.want {
+			t.Errorf("NeedsCgroupV1Fallback(%q, %v) = %v, want %v", tc.version, tc.cgroupV1, got, tc.want)
+		}
+	}
+	if args := JoinArgsForCgroupV1(true); len(args) != 1 || args[0] != CgroupV1PreflightArg {
+		t.Errorf("JoinArgsForCgroupV1(true) = %v", args)
+	}
+	if args := JoinArgsForCgroupV1(false); args != nil {
+		t.Errorf("JoinArgsForCgroupV1(false) = %v, want nil", args)
+	}
+}
+
+func TestKubeadmConfigCgroupV1(t *testing.T) {
+	opts := KubeadmOptions{
+		APIAddress:      "10.0.0.10",
+		ImageRepository: "registry.k8s.io",
+		PodCIDR:         "10.244.0.0/16",
+		ServiceCIDR:     "10.96.0.0/12",
+	}
+	out, err := KubeadmConfig(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "failCgroupV1") {
+		t.Fatalf("cgroup v2 hosts must not get the kubelet override:\n%s", out)
+	}
+
+	opts.CgroupV1 = true
+	out, err = KubeadmConfig(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"apiVersion: kubelet.config.k8s.io/v1beta1",
+		"kind: KubeletConfiguration",
+		"failCgroupV1: false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("kubeadm config missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestKubeadmConfigValidation(t *testing.T) {
 	base := KubeadmOptions{
 		APIAddress:      "10.0.0.10",

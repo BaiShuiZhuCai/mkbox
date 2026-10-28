@@ -181,7 +181,6 @@ var englishOutput = map[string]string{
 	"已跳过系统预检，请确保 swap、sysctl、containerd 已正确配置":                                 "System preflight skipped; ensure swap, sysctl and containerd are configured correctly",
 	"已生成 kubeadm 配置: %s":                                                       "Generated kubeadm configuration: %s",
 	"[dry-run] 将执行: kubeadm config images pull --config %s":                    "[dry-run] would run: kubeadm config images pull --config %s",
-	"[dry-run] 将执行: kubeadm init --config %s":                                  "[dry-run] would run: kubeadm init --config %s",
 	"拉取 Kubernetes 镜像":                                                         "Pulling Kubernetes images",
 	"初始化控制平面":                                                                  "Initializing the control plane",
 	"节点已就绪":                                                                    "Node is ready",
@@ -285,4 +284,14 @@ var englishOutput = map[string]string{
 	"无法读取 containerd 插件列表，跳过 CRI 校验: %v": "Cannot read the containerd plugin list; skipping the CRI check: %v",
 
 	"containerd 插件列表为空，跳过 CRI 校验": "The containerd plugin list is empty; skipping the CRI check",
+
+	"系统仅支持 cgroups v1，Kubernetes 1.35 起默认拒绝启动 kubelet；已写入 failCgroupV1: false 并跳过 SystemVerification 预检": "The host only supports cgroups v1 and Kubernetes 1.35+ refuses to start kubelet there; wrote failCgroupV1: false and skip the SystemVerification preflight check",
+
+	"系统仅支持 cgroups v1，Kubernetes 1.35 起默认拒绝启动 kubelet；mkbox 会自动写入 failCgroupV1: false 并跳过 SystemVerification 预检，长期请迁移到 cgroups v2": "The host only supports cgroups v1 and Kubernetes 1.35+ refuses to start kubelet there; mkbox writes failCgroupV1: false and skips the SystemVerification preflight check, migrate to cgroups v2 for the long term",
+
+	"系统仅支持 cgroups v1，升级到 Kubernetes 1.35 前需迁移到 cgroups v2，否则 kubelet 将无法启动": "The host only supports cgroups v1; migrate to cgroups v2 before upgrading to Kubernetes 1.35 or kubelet will not start",
+
+	"当前节点仅支持 cgroups v1，已为 kubeadm join 跳过 SystemVerification 预检": "This node only supports cgroups v1; the SystemVerification preflight check is skipped for kubeadm join",
+
+	"[dry-run] 将执行: kubeadm %s": "[dry-run] would run: kubeadm %s",
 }
