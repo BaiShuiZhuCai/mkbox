@@ -36,6 +36,8 @@ var (
 	sandboxRe = regexp.MustCompile(`(?m)^(\s*)sandbox_image\s*=\s*(?:"[^"]*"|'[^']*')`)
 	pauseRe   = regexp.MustCompile(`pause:([0-9][0-9A-Za-z.\-]*)`)
 	versionRe = regexp.MustCompile(`v?(\d+)\.\d+`)
+	// pluginEntryRe extracts the quoted items of a TOML string array.
+	pluginEntryRe = regexp.MustCompile(`"([^"]*)"|'([^']*)'`)
 )
 
 // Manager configures containerd.
@@ -219,6 +221,82 @@ func splice(lines []string, before map[int][]string) []string {
 	return out
 }
 
+// disablesCRIEntry reports whether a disabled_plugins entry switches a CRI
+// plugin off. Packages (deb/rpm and vendor images) commonly ship
+// `disabled_plugins = ["cri"]`, and kubeadm then fails to create the CRI
+// service because the socket has no runtime.v1.RuntimeService.
+func disablesCRIEntry(entry string) bool {
+	entry = strings.TrimSpace(entry)
+	return entry == "cri" || entry == "io.containerd.grpc.v1.cri" ||
+		strings.HasPrefix(entry, "io.containerd.cri.v1.")
+}
+
+// DisablesCRI reports whether config.toml keeps a CRI plugin in
+// disabled_plugins, i.e. whether the socket cannot serve CRI clients.
+func DisablesCRI(content string) bool {
+	_, changed := EnableCRIPlugin(content)
+	return changed
+}
+
+// EnableCRIPlugin drops CRI entries from the top-level disabled_plugins array
+// so containerd serves the CRI API again. Unrelated disabled plugins are kept
+// and content is returned unchanged when CRI is not disabled.
+func EnableCRIPlugin(content string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	start := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			// disabled_plugins is a top-level key: stop at the first table.
+			break
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "disabled_plugins"))
+		if rest != trimmed && strings.HasPrefix(rest, "=") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return content, false
+	}
+	// The array may span several lines up to the closing bracket.
+	end := start
+	for end < len(lines) && !strings.Contains(lines[end], "]") {
+		end++
+	}
+	if end >= len(lines) {
+		return content, false
+	}
+
+	kept := []string{}
+	changed := false
+	statement := strings.Join(lines[start:end+1], "\n")
+	for _, match := range pluginEntryRe.FindAllStringSubmatch(statement, -1) {
+		entry := match[1]
+		if entry == "" {
+			entry = match[2]
+		}
+		if disablesCRIEntry(entry) {
+			changed = true
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	if !changed {
+		return content, false
+	}
+
+	quoted := make([]string, len(kept))
+	for i, entry := range kept {
+		quoted[i] = strconv.Quote(entry)
+	}
+	out := make([]string, 0, len(lines))
+	out = append(out, lines[:start]...)
+	out = append(out, "disabled_plugins = ["+strings.Join(quoted, ", ")+"]")
+	out = append(out, lines[end+1:]...)
+	return strings.Join(out, "\n"), true
+}
+
 // EditConfig applies the required containerd settings to a config.toml.
 // It is a pure function so it can be unit tested.
 func EditConfig(content, sandboxRepository string) (string, error) {
@@ -236,6 +314,9 @@ func EditConfigForVersion(content, sandboxRepository string, major int) (string,
 	if strings.TrimSpace(content) == "" {
 		return content, nil
 	}
+	// A packaged `disabled_plugins = ["cri"]` keeps the plugin off no matter
+	// which CRI tables the file carries, so drop it before anything else.
+	content, _ = EnableCRIPlugin(content)
 	layout := selectLayout(content, major)
 	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 
@@ -374,8 +455,40 @@ func HostsTOML(server string, mirrors []string) string {
 	return b.String()
 }
 
-// Restart restarts containerd.
+// HasCRIPlugin reports whether `ctr plugins ls` output lists a CRI plugin.
+// containerd 1.x registers io.containerd.grpc.v1.cri, 2.x splits the CRI
+// plugin into io.containerd.cri.v1.runtime and io.containerd.cri.v1.images.
+func HasCRIPlugin(pluginsOutput string) bool {
+	return strings.Contains(pluginsOutput, "io.containerd.cri.v1.runtime") ||
+		strings.Contains(pluginsOutput, "io.containerd.grpc.v1.cri")
+}
+
+// VerifyCRI checks that the running containerd actually serves the CRI API.
+// kubeadm fails with "unknown service runtime.v1.RuntimeService" when the
+// plugin is disabled, so the check turns a late, cryptic failure into an
+// actionable error. It is best-effort: without ctr or a reachable socket the
+// check is skipped.
+func (m *Manager) VerifyCRI() error {
+	if m.R == nil || m.R.DryRun || !execx.Has("ctr") {
+		return nil
+	}
+	out, err := m.R.Output("ctr", "plugins", "ls")
+	if err != nil {
+		logx.Warnf("无法读取 containerd 插件列表，跳过 CRI 校验: %v", err)
+		return nil
+	}
+	if HasCRIPlugin(out) {
+		return nil
+	}
+	return fmt.Errorf("containerd 已启动但未启用 CRI 插件，kubeadm 会报 unknown service runtime.v1.RuntimeService；请从 %s 的 disabled_plugins 中移除 cri 后重启 containerd", m.Path)
+}
+
+// Restart restarts containerd and verifies that the CRI plugin is served.
 func (m *Manager) Restart() error {
+	return m.restart(true)
+}
+
+func (m *Manager) restart(verifyCRI bool) error {
 	if !m.OS.HasSystemd() {
 		if m.R.DryRun {
 			logx.Infof("[dry-run] 未检测到 systemd，跳过重启 containerd")
@@ -393,6 +506,11 @@ func (m *Manager) Restart() error {
 		if _, err := m.R.Output("systemctl", "is-active", "containerd"); err != nil {
 			return fmt.Errorf("containerd 未处于运行状态: %w", err)
 		}
+		if verifyCRI {
+			if err := m.VerifyCRI(); err != nil {
+				return err
+			}
+		}
 	}
 	logx.Successf("containerd 配置已生效")
 	return nil
@@ -407,7 +525,8 @@ func (m *Manager) SetProxy(proxyURL string, noProxy []string) error {
 	if err := m.FS.Write(ProxyConf, []byte(content), 0o644); err != nil {
 		return err
 	}
-	return m.Restart()
+	// Proxy changes must not fail on an unrelated CRI problem.
+	return m.restart(false)
 }
 
 // ClearProxy removes the containerd proxy drop-in.

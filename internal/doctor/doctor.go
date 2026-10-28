@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/makebox/makebox/internal/config"
+	"github.com/makebox/makebox/internal/containerd"
 	"github.com/makebox/makebox/internal/docker"
 	"github.com/makebox/makebox/internal/execx"
 	"github.com/makebox/makebox/internal/k8s"
@@ -228,6 +229,12 @@ func Run(o *system.OS, r *execx.Runner, opts Options) *Report {
 			add("containerd", Warn, state+", SystemdCgroup 未启用", "`mkbox k8s install` 会自动修正")
 		} else {
 			add("containerd", OK, state, "")
+		}
+		// Packages often disable the CRI plugin, which leaves kubeadm without
+		// a runtime.v1.RuntimeService to talk to.
+		if data, err := os.ReadFile(containerd.ConfigPath); err == nil && containerd.DisablesCRI(string(data)) {
+			add("containerd CRI", Warn, "disabled_plugins 含 cri",
+				"kubeadm 会报 unknown service runtime.v1.RuntimeService；`mkbox k8s install` 会自动修正")
 		}
 	}
 

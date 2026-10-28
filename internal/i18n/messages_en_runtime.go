@@ -89,4 +89,8 @@ var englishDoctor = map[string]string{
 	"代理仅用于下载，不会改变容器内流量":                                         "The proxy is only used for downloads and does not affect container traffic",
 	"查看 `mkbox net test` 了解详情":                                  "Run `mkbox net test` for details",
 	"运行 `mkbox registry test` 查看延迟":                             "Run `mkbox registry test` to check latency",
+
+	"disabled_plugins 含 cri": "disabled_plugins contains cri",
+
+	"kubeadm 会报 unknown service runtime.v1.RuntimeService；`mkbox k8s install` 会自动修正": "kubeadm fails with unknown service runtime.v1.RuntimeService; `mkbox k8s install` fixes it automatically",
 }

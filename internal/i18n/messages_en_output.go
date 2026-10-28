@@ -276,4 +276,9 @@ var englishOutput = map[string]string{
 	"已安装，服务未运行":        "Installed, service not running",
 	"未检测到本地集群":         "No local cluster detected",
 	"普通用户（修改系统需 sudo）": "Regular user (sudo required for changes)",
+
+	// containerd CRI plugin messages.
+	"containerd 已启动但未启用 CRI 插件，kubeadm 会报 unknown service runtime.v1.RuntimeService；请从 %s 的 disabled_plugins 中移除 cri 后重启 containerd": "containerd is running without the CRI plugin and kubeadm fails with unknown service runtime.v1.RuntimeService; remove cri from disabled_plugins in %s and restart containerd",
+
+	"无法读取 containerd 插件列表，跳过 CRI 校验: %v": "Cannot read the containerd plugin list; skipping the CRI check: %v",
 }

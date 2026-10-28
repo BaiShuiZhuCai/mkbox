@@ -217,6 +217,27 @@ sudo mkbox k8s up --image-repository registry.aliyuncs.com/google_containers
 
 已经初始化过但想重新拉取时，先 `mkbox k8s reset`，再重新初始化。
 
+### kubeadm 报 unknown service runtime.v1.RuntimeService
+
+完整报错类似：
+
+```text
+failed to create new CRI runtime service: validate CRI v1 runtime API for endpoint
+"unix:///run/containerd/containerd.sock": rpc error: code = Unimplemented
+desc = unknown service runtime.v1.RuntimeService
+```
+
+说明 containerd 在运行，但没有对外提供 CRI 接口，kubeadm 因此无法拉取镜像。最常见原因是发行版软件包默认禁用了 CRI 插件：
+
+```bash
+grep -n disabled_plugins /etc/containerd/config.toml
+sudo ctr plugins ls | grep -E 'cri|healthcheck'
+```
+
+- `/etc/containerd/config.toml` 中出现 `disabled_plugins = ["cri"]`，或 `ctr plugins ls` 里没有 `io.containerd.grpc.v1.cri`（1.x）/ `io.containerd.cri.v1.runtime`（2.x）。
+- 处理方式：`sudo mkbox k8s install` 会自动从 `disabled_plugins` 中移除 `cri` 并重启 containerd；手动处理则删除该条目后执行 `sudo systemctl restart containerd`。
+- 如果 `ctr plugins ls` 里 CRI 插件状态不是 `ok`，执行 `journalctl -u containerd -n 200 --no-pager` 查看插件加载失败的具体字段。
+
 ### CNI 安装失败
 
 CNI 清单默认从 GitHub 下载。网络受限时：

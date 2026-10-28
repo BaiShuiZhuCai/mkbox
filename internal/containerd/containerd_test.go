@@ -170,6 +170,127 @@ func TestEditConfigIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestEditConfigEnablesPackagedCRIConfig(t *testing.T) {
+	// deb/rpm packages ship CRI disabled, which makes kubeadm fail with
+	// "unknown service runtime.v1.RuntimeService".
+	content := "version = 2\ndisabled_plugins = [\"cri\"]\n\n[grpc]\n  address = \"/run/containerd/containerd.sock\"\n"
+	out, err := EditConfig(content, "")
+	if err != nil {
+		t.Fatalf("EditConfig: %v", err)
+	}
+	if !strings.Contains(out, "disabled_plugins = []") {
+		t.Fatalf("CRI plugin still disabled:\n%s", out)
+	}
+	if !strings.Contains(out, `[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]`) {
+		t.Fatalf("runc options table missing:\n%s", out)
+	}
+	if DisablesCRI(out) {
+		t.Fatalf("CRI still reported as disabled:\n%s", out)
+	}
+}
+
+func TestEnableCRIPluginKeepsOtherPlugins(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+		changed bool
+	}{
+		{
+			name:    "single entry",
+			content: "version = 2\ndisabled_plugins = [\"cri\"]\n",
+			want:    "disabled_plugins = []",
+			changed: true,
+		},
+		{
+			name:    "keeps unrelated plugins",
+			content: "version = 2\ndisabled_plugins = [\"aufs\", \"cri\"]\n",
+			want:    "disabled_plugins = [\"aufs\"]",
+			changed: true,
+		},
+		{
+			name:    "multi line array",
+			content: "version = 2\ndisabled_plugins = [\n  \"cri\",\n  \"aufs\",\n]\n",
+			want:    "disabled_plugins = [\"aufs\"]",
+			changed: true,
+		},
+		{
+			name:    "full plugin id",
+			content: "version = 3\ndisabled_plugins = [\"io.containerd.cri.v1.runtime\"]\n",
+			want:    "disabled_plugins = []",
+			changed: true,
+		},
+		{
+			name:    "already enabled",
+			content: "version = 2\ndisabled_plugins = [\"aufs\"]\n",
+			want:    "disabled_plugins = [\"aufs\"]",
+			changed: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, changed := EnableCRIPlugin(tc.content)
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("missing %q:\n%s", tc.want, out)
+			}
+			if strings.Contains(out, `"cri"`) {
+				t.Fatalf("CRI entry still present:\n%s", out)
+			}
+			if changed != tc.changed {
+				t.Fatalf("changed = %v; want %v", changed, tc.changed)
+			}
+			if !tc.changed && out != tc.content {
+				t.Fatalf("disabled config must be returned unchanged:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestEnableCRIPluginIgnoresNestedKey(t *testing.T) {
+	// Inside a table the key would be <table>.disabled_plugins, so it must be
+	// left untouched.
+	content := "version = 2\n[plugins.\"io.containerd.internal.v1.opt\"]\n  disabled_plugins = [\"cri\"]\n"
+	out, changed := EnableCRIPlugin(content)
+	if changed || out != content {
+		t.Fatalf("nested disabled_plugins must be left alone:\n%s", out)
+	}
+}
+
+func TestEditConfigEnablesCRIAndUsesContainerd2Tables(t *testing.T) {
+	content := "version = 3\ndisabled_plugins = [\"cri\"]\n\n" + strings.TrimPrefix(containerd2Config, "version = 3\n\n")
+	out, err := EditConfig(content, "registry.aliyuncs.com/google_containers")
+	if err != nil {
+		t.Fatalf("EditConfig: %v", err)
+	}
+	if !strings.Contains(out, "disabled_plugins = []") || DisablesCRI(out) {
+		t.Fatalf("CRI plugin still disabled:\n%s", out)
+	}
+	if strings.Contains(out, "io.containerd.grpc.v1.cri") {
+		t.Fatalf("1.x CRI plugin written into a 2.x config:\n%s", out)
+	}
+	if !strings.Contains(out, `[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]`) {
+		t.Fatalf("2.x runc options table missing:\n%s", out)
+	}
+}
+
+func TestHasCRIPlugin(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"containerd 1.x", "io.containerd.grpc.v1.cri          linux/amd64    ok\n", true},
+		{"containerd 2.x", "io.containerd.cri.v1.runtime       linux/amd64    ok\n", true},
+		{"cri disabled", "io.containerd.grpc.v1.healthcheck   linux/amd64    ok\n", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		if got := HasCRIPlugin(tc.out); got != tc.want {
+			t.Errorf("%s: HasCRIPlugin = %v; want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestParseMajorVersion(t *testing.T) {
 	cases := []struct {
 		in   string
