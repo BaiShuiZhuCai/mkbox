@@ -141,7 +141,6 @@ var englishOutput = map[string]string{
 	"[dry-run] 将执行 containerd config default > %s":                             "[dry-run] would run containerd config default > %s",
 	"已更新 %s（SystemdCgroup=true）":                                               "Updated %s (SystemdCgroup=true)",
 	"已配置 Docker Hub 镜像加速: %s":                                                  "Configured Docker Hub registry mirrors: %s",
-	"未找到 sandbox_image 配置，跳过 pause 镜像替换":                                       "sandbox_image not found; skipping pause image replacement",
 	"[dry-run] 未检测到 systemd，跳过重启 containerd":                                   "[dry-run] systemd not detected; skipping containerd restart",
 	"containerd 配置已生效":                                                         "containerd configuration applied",
 	"已移除 containerd 代理配置":                                                      "Removed containerd proxy configuration",

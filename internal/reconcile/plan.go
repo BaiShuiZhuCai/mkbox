@@ -140,9 +140,9 @@ func BuildPlan(profile Profile, obs Observed, osInfo *system.OS, opts PlanOption
 			}
 
 			if distro == "kubeadm" && !installPlanned && obs.ContainerdInstalled {
-				desiredCfg, err := DesiredContainerdConfig(obs.containerdCfg, profile.K8s)
+				desiredCfg, err := DesiredContainerdConfig(obs.containerdCfg, profile.K8s, obs.ContainerdVersion)
 				if err != nil {
-					return p, fmt.Errorf("无法计算 containerd 期望配置: %w（请备份后删除 /etc/containerd/config.toml 再重试）", err)
+					return p, fmt.Errorf("无法计算 containerd 期望配置: %w", err)
 				}
 				cfgChanged := desiredCfg != obs.containerdCfg
 				hostsDesired := DesiredContainerdHosts(profile.Docker)

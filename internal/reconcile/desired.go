@@ -44,12 +44,13 @@ func DesiredDockerProxy(p ProxyProfile) string {
 }
 
 // DesiredContainerdConfig applies the Kubernetes-friendly containerd settings
-// to an existing config.
-func DesiredContainerdConfig(current string, p K8sProfile) (string, error) {
+// to an existing config. The installed containerd version decides which CRI
+// table layout is written when the file has none yet.
+func DesiredContainerdConfig(current string, p K8sProfile, containerdVersion string) (string, error) {
 	if strings.TrimSpace(current) == "" {
 		return "", nil
 	}
-	return containerd.EditConfig(current, p.ImageRepository)
+	return containerd.EditConfigForVersion(current, p.ImageRepository, containerd.ParseMajorVersion(containerdVersion))
 }
 
 // DesiredContainerdHosts renders the Docker Hub mirror hosts.toml.

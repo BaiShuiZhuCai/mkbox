@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/makebox/makebox/internal/docker"
@@ -23,11 +24,18 @@ const (
 	DropInDir = "/etc/systemd/system/containerd.service.d"
 	// ProxyConf configures proxies for containerd.
 	ProxyConf = DropInDir + "/http-proxy.conf"
+	// systemdCgroupLine is the runc option Kubernetes requires.
+	systemdCgroupLine = "SystemdCgroup = true"
+	// defaultPauseVersion is used when config.toml has no sandbox image yet.
+	defaultPauseVersion = "3.10"
 )
 
 var (
-	sandboxRe = regexp.MustCompile(`(?m)^(\s*)sandbox_image\s*=\s*"[^"]*"`)
+	// sandboxRe matches both the double- and single-quoted TOML styles that
+	// containerd 1.x and 2.x generate for sandbox_image.
+	sandboxRe = regexp.MustCompile(`(?m)^(\s*)sandbox_image\s*=\s*(?:"[^"]*"|'[^']*')`)
 	pauseRe   = regexp.MustCompile(`pause:([0-9][0-9A-Za-z.\-]*)`)
+	versionRe = regexp.MustCompile(`v?(\d+)\.\d+`)
 )
 
 // Manager configures containerd.
@@ -82,7 +90,7 @@ func (m *Manager) Configure(mirrors []string, sandboxRepository string) error {
 		return err
 	}
 	if content != "" {
-		updated, err := EditConfig(content, sandboxRepository)
+		updated, err := EditConfigForVersion(content, sandboxRepository, m.MajorVersion())
 		if err != nil {
 			return err
 		}
@@ -108,48 +116,204 @@ func (m *Manager) Configure(mirrors []string, sandboxRepository string) error {
 	return nil
 }
 
+// MajorVersion reports the installed containerd major version, or 0 when it
+// cannot be determined (missing binary, unparsable output or --dry-run).
+func (m *Manager) MajorVersion() int {
+	if m.R == nil || m.R.DryRun {
+		return 0
+	}
+	out, err := m.R.Output("containerd", "--version")
+	if err != nil {
+		return 0
+	}
+	return ParseMajorVersion(out)
+}
+
+// criLayout lists the CRI plugin tables that differ between containerd
+// generations. containerd 1.x keeps everything under io.containerd.grpc.v1.cri;
+// containerd 2.x splits it into io.containerd.cri.v1.runtime and
+// io.containerd.cri.v1.images.
+type criLayout struct {
+	sandbox        string // table that owns sandbox_image
+	runtimeOptions string // table that owns the runc options (SystemdCgroup)
+}
+
+var (
+	layoutGRPCv1 = criLayout{
+		sandbox:        `[plugins."io.containerd.grpc.v1.cri"]`,
+		runtimeOptions: `[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]`,
+	}
+	layoutCRIv1 = criLayout{
+		sandbox:        `[plugins.'io.containerd.cri.v1.runtime']`,
+		runtimeOptions: `[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]`,
+	}
+)
+
+// ParseMajorVersion extracts the containerd major version from
+// `containerd --version` output and returns 0 when no version is found.
+func ParseMajorVersion(versionText string) int {
+	match := versionRe.FindStringSubmatch(versionText)
+	if match == nil {
+		return 0
+	}
+	major, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0
+	}
+	return major
+}
+
+// selectLayout prefers the generation already present in config.toml so an
+// existing file is never migrated, and falls back to the installed containerd
+// major version (0 = unknown) when the file has no CRI plugin yet.
+func selectLayout(content string, major int) criLayout {
+	switch {
+	case strings.Contains(content, "io.containerd.cri.v1.runtime"):
+		return layoutCRIv1
+	case strings.Contains(content, "io.containerd.grpc.v1.cri"):
+		return layoutGRPCv1
+	case major >= 2:
+		return layoutCRIv1
+	}
+	return layoutGRPCv1
+}
+
+// tableKey normalises a TOML table header so that quote style and spacing do
+// not matter when comparing it against a generated path. Array tables return
+// an empty key because they never match a plain table.
+func tableKey(header string) string {
+	header = strings.TrimSpace(header)
+	if strings.HasPrefix(header, "[[") || !strings.HasPrefix(header, "[") || !strings.HasSuffix(header, "]") {
+		return ""
+	}
+	replacer := strings.NewReplacer(`"`, "", `'`, "", " ", "", "\t", "")
+	return replacer.Replace(header[1 : len(header)-1])
+}
+
+// indentOf returns the leading whitespace of a line.
+func indentOf(line string) string {
+	return line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+}
+
+// sandboxImageLine renders the sandbox_image assignment for a repository.
+func sandboxImageLine(repository, pauseVersion string) string {
+	pause := "pause:" + pauseVersion
+	if repo := strings.TrimRight(repository, "/"); repo != "" {
+		return fmt.Sprintf(`sandbox_image = "%s/%s"`, repo, pause)
+	}
+	return fmt.Sprintf(`sandbox_image = "registry.k8s.io/%s"`, pause)
+}
+
+// splice inserts extra lines at the given "before" positions.
+func splice(lines []string, before map[int][]string) []string {
+	if len(before) == 0 {
+		return lines
+	}
+	out := make([]string, 0, len(lines)+len(before)*2)
+	for i := 0; i <= len(lines); i++ {
+		out = append(out, before[i]...)
+		if i < len(lines) {
+			out = append(out, lines[i])
+		}
+	}
+	return out
+}
+
 // EditConfig applies the required containerd settings to a config.toml.
 // It is a pure function so it can be unit tested.
 func EditConfig(content, sandboxRepository string) (string, error) {
-	lines := strings.Split(content, "\n")
-	foundCgroup := false
-	foundSandbox := false
+	return EditConfigForVersion(content, sandboxRepository, 0)
+}
 
-	pauseVersion := "3.10"
+// EditConfigForVersion is EditConfig with the containerd major version known.
+// The version decides the CRI table layout when config.toml has no CRI plugin
+// yet; pass 0 to infer the layout from the content only.
+//
+// Settings that are absent (no SystemdCgroup line, no runc options table at
+// all) are appended instead of failing, because configs shipped by the
+// containerd.io packages only carry `version` and no CRI plugin tables.
+func EditConfigForVersion(content, sandboxRepository string, major int) (string, error) {
+	if strings.TrimSpace(content) == "" {
+		return content, nil
+	}
+	layout := selectLayout(content, major)
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+
+	pauseVersion := defaultPauseVersion
 	if match := pauseRe.FindStringSubmatch(content); len(match) > 1 {
 		pauseVersion = match[1]
 	}
+	sandboxImage := sandboxImageLine(sandboxRepository, pauseVersion)
+
+	sandboxKey := tableKey(layout.sandbox)
+	optionsKey := tableKey(layout.runtimeOptions)
+
+	foundCgroup, foundSandbox := false, false
+	table := ""
+	sandboxIdx, optionsIdx, firstCRIIdx := -1, -1, -1
 
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "SystemdCgroup") {
-			indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-			lines[i] = indent + "SystemdCgroup = true"
+		if key := tableKey(trimmed); key != "" {
+			table = key
+			if firstCRIIdx < 0 && (key == sandboxKey || strings.HasPrefix(key, sandboxKey+".")) {
+				firstCRIIdx = i
+			}
+			if key == sandboxKey && sandboxIdx < 0 {
+				sandboxIdx = i
+			}
+			if key == optionsKey && optionsIdx < 0 {
+				optionsIdx = i
+			}
+			continue
+		}
+		if table == optionsKey && strings.HasPrefix(trimmed, "SystemdCgroup") {
+			lines[i] = indentOf(line) + systemdCgroupLine
 			foundCgroup = true
 			continue
 		}
-		if sandboxRe.MatchString(line) {
-			indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-			pause := "pause:" + pauseVersion
-			if sandboxRepository != "" {
-				lines[i] = fmt.Sprintf(`%ssandbox_image = "%s/%s"`, indent, strings.TrimRight(sandboxRepository, "/"), pause)
-			} else {
-				lines[i] = fmt.Sprintf(`%ssandbox_image = "registry.k8s.io/%s"`, indent, pause)
-			}
+		if table == sandboxKey && sandboxRe.MatchString(line) {
+			lines[i] = indentOf(line) + sandboxImage
 			foundSandbox = true
 		}
 	}
 
-	if !foundCgroup {
-		return "", fmt.Errorf("未在 %s 中找到 SystemdCgroup 配置；请备份后删除该文件并重试，或手动设置 SystemdCgroup = true", ConfigPath)
-	}
+	// Existing tables take the missing keys; no header is duplicated.
+	inserts := map[int][]string{}
 	if !foundSandbox {
-		logx.Warnf("未找到 sandbox_image 配置，跳过 pause 镜像替换")
+		switch {
+		case sandboxIdx >= 0:
+			inserts[sandboxIdx+1] = append(inserts[sandboxIdx+1], "  "+sandboxImage)
+		case firstCRIIdx >= 0:
+			inserts[firstCRIIdx] = append(inserts[firstCRIIdx], layout.sandbox, "  "+sandboxImage)
+		}
+	}
+	if !foundCgroup && optionsIdx >= 0 {
+		inserts[optionsIdx+1] = append(inserts[optionsIdx+1], "  "+systemdCgroupLine)
+	}
+	out := splice(lines, inserts)
+
+	// Missing tables are appended parent-first: appending after the last line
+	// keeps every existing key inside its own table.
+	var tail []string
+	addTail := func(block ...string) {
+		if len(tail) > 0 {
+			tail = append(tail, "")
+		}
+		tail = append(tail, block...)
+	}
+	if !foundSandbox && sandboxIdx < 0 && firstCRIIdx < 0 {
+		addTail(layout.sandbox, "  "+sandboxImage)
+	}
+	if !foundCgroup && optionsIdx < 0 {
+		addTail(layout.runtimeOptions, "  "+systemdCgroupLine)
+	}
+	if len(tail) > 0 {
+		out = append(out, "")
+		out = append(out, tail...)
 	}
 
-	content = strings.Join(lines, "\n")
-	content = EnsureRegistryConfigPath(content, "/etc/containerd/certs.d")
-	return content, nil
+	return EnsureRegistryConfigPath(strings.Join(out, "\n")+"\n", CertsDir), nil
 }
 
 // EnsureRegistryConfigPath sets the CRI registry config_path.
@@ -174,7 +338,9 @@ func EnsureRegistryConfigPath(content, path string) string {
 	}
 	if !foundSection {
 		section := `[plugins."io.containerd.grpc.v1.cri".registry]`
-		if strings.Contains(content, "io.containerd.cri.v1.images") {
+		// containerd 2.x moved the registry config next to the split CRI
+		// plugins; any io.containerd.cri.v1.* table implies that layout.
+		if strings.Contains(content, "io.containerd.cri.v1.") {
 			section = `[plugins.'io.containerd.cri.v1.images'.registry]`
 		}
 		content = strings.TrimRight(content, "\n") + "\n\n" + section + "\n  config_path = \"" + path + "\"\n"
